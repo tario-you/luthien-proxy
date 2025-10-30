@@ -8,10 +8,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import uuid
-from dataclasses import dataclass
-from typing import AsyncIterator, Literal, cast
+from typing import AsyncIterator, cast
 
 import litellm
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,7 +21,6 @@ from opentelemetry import trace
 from redis.asyncio import Redis
 
 from luthien_proxy.utils import db
-from luthien_proxy.v2.config import RuntimeConfig
 from luthien_proxy.v2.control.synchronous_control_plane import SynchronousControlPlane
 from luthien_proxy.v2.llm.format_converters import (
     anthropic_to_openai_request,
@@ -41,32 +38,11 @@ router = APIRouter(tags=["gateway"])
 security = HTTPBearer(auto_error=False)
 
 
-@dataclass
-class GatewayAuth:
-    """Authentication result for a gateway request."""
-
-    auth_type: Literal["proxy", "client_provider"]
-    presented_key: str
-    provider_name: str | None = None
-    provider_api_key: str | None = None
-    provider_org: str | None = None
-
-
-@dataclass
-class ProviderCredentials:
-    """Resolved upstream provider credentials."""
-
-    provider: str
-    api_key: str
-    organization: str | None
-    source: Literal["client", "config", "env"]
-
-
 # === AUTH ===
 def verify_token(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> GatewayAuth:
+) -> str:
     """Verify API key from either Authorization header or x-api-key header.
 
     Supports both:
@@ -74,43 +50,15 @@ def verify_token(
     - x-api-key: <key> (Anthropic-style)
     """
     api_key = request.app.state.api_key
-    runtime_config = _get_runtime_config(request)
-    gateway_settings = runtime_config.gateway
 
     # Try Authorization: Bearer header first
     if credentials and credentials.credentials == api_key:
-        return GatewayAuth(auth_type="proxy", presented_key=credentials.credentials)
+        return credentials.credentials
 
     # Try x-api-key header (Anthropic convention)
     x_api_key = request.headers.get("x-api-key")
     if x_api_key and x_api_key == api_key:
-        return GatewayAuth(auth_type="proxy", presented_key=x_api_key)
-
-    if gateway_settings.allow_client_provider_keys:
-        provider_name = _infer_provider_name(request)
-        provider_settings = runtime_config.get_provider(provider_name)
-
-        if not provider_settings.enabled:
-            raise HTTPException(status_code=403, detail=f"Provider '{provider_name}' is disabled")
-
-        provider_key, provider_org = _extract_client_provider_credentials(
-            request=request,
-            credentials=credentials,
-            provider_name=provider_name,
-        )
-        if provider_key:
-            logger.info(
-                "Client-supplied provider credentials accepted for %s (hash=%s)",
-                provider_name,
-                hash_api_key(provider_key),
-            )
-            return GatewayAuth(
-                auth_type="client_provider",
-                presented_key=provider_key,
-                provider_name=provider_name,
-                provider_api_key=provider_key,
-                provider_org=provider_org,
-            )
+        return x_api_key
 
     raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -118,87 +66,6 @@ def verify_token(
 def hash_api_key(key: str) -> str:
     """Hash API key for logging."""
     return hashlib.sha256(key.encode()).hexdigest()[:16]
-
-
-def _get_runtime_config(request: Request) -> RuntimeConfig:
-    runtime_config = getattr(request.app.state, "runtime_config", None)
-    if isinstance(runtime_config, RuntimeConfig):
-        return runtime_config
-    return RuntimeConfig()
-
-
-def _infer_provider_name(request: Request) -> str:
-    """Infer provider name based on request path."""
-    path = request.url.path
-    if path.startswith("/v1/messages"):
-        return "anthropic"
-    return "openai"
-
-
-def _extract_client_provider_credentials(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials | None,
-    provider_name: str,
-) -> tuple[str | None, str | None]:
-    """Extract provider key/org supplied by the client."""
-    headers = request.headers
-
-    provider_key = headers.get("x-provider-api-key")
-    provider_org = headers.get("x-provider-org")
-
-    if provider_name == "openai":
-        provider_key = provider_key or headers.get("x-openai-api-key")
-        provider_org = provider_org or headers.get("openai-organization")
-    elif provider_name == "anthropic":
-        provider_key = provider_key or headers.get("x-api-key")
-
-    if credentials and credentials.credentials:
-        provider_key = provider_key or credentials.credentials
-
-    return provider_key, provider_org
-
-
-def resolve_provider_credentials(
-    request: Request,
-    provider_name: str,
-    auth: GatewayAuth,
-) -> ProviderCredentials:
-    """Resolve upstream credentials for the given provider."""
-    runtime_config = _get_runtime_config(request)
-    provider_settings = runtime_config.get_provider(provider_name)
-
-    if not provider_settings.enabled:
-        raise HTTPException(status_code=403, detail=f"Provider '{provider_name}' is disabled")
-
-    if auth.provider_name == provider_name and auth.provider_api_key:
-        return ProviderCredentials(
-            provider=provider_name,
-            api_key=auth.provider_api_key,
-            organization=auth.provider_org or provider_settings.org,
-            source="client",
-        )
-
-    if provider_settings.api_key:
-        return ProviderCredentials(
-            provider=provider_name,
-            api_key=provider_settings.api_key,
-            organization=provider_settings.org,
-            source="config",
-        )
-
-    if provider_settings.env_var:
-        env_api_key = os.getenv(provider_settings.env_var)
-        if env_api_key:
-            org_env = provider_settings.org_env_var or ""
-            org_value = provider_settings.org or (os.getenv(org_env) if org_env else None)
-            return ProviderCredentials(
-                provider=provider_name,
-                api_key=env_api_key,
-                organization=org_value,
-                source="env",
-            )
-
-    raise HTTPException(status_code=401, detail=f"No API key configured for provider '{provider_name}'")
 
 
 # === STREAMING HELPERS ===
@@ -492,7 +359,7 @@ async def process_non_streaming_response(
 @router.post("/v1/chat/completions")
 async def openai_chat_completions(
     request: Request,
-    auth: GatewayAuth = Depends(verify_token),
+    token: str = Depends(verify_token),
 ):
     """OpenAI-compatible endpoint."""
     # Get dependencies from app state
@@ -532,16 +399,6 @@ async def openai_chat_completions(
         # Extract back to dict for LiteLLM
         data = final_request.model_dump(exclude_none=True)
         is_streaming = data.get("stream", False)
-        provider_creds = resolve_provider_credentials(request, "openai", auth)
-        data["api_key"] = provider_creds.api_key
-        if provider_creds.organization:
-            data["organization"] = provider_creds.organization
-        logger.info(
-            "[%s] Forwarding to OpenAI using %s credentials (hash=%s)",
-            call_id,
-            provider_creds.source,
-            hash_api_key(provider_creds.api_key),
-        )
 
         # Publish: final request being sent to backend (for real-time UI)
         await publish_request_sent_event(
@@ -576,7 +433,7 @@ async def openai_chat_completions(
 @router.post("/v1/messages")
 async def anthropic_messages(
     request: Request,
-    auth: GatewayAuth = Depends(verify_token),
+    token: str = Depends(verify_token),
 ):
     """Anthropic Messages API endpoint."""
     # Get dependencies from app state
@@ -607,16 +464,6 @@ async def anthropic_messages(
         # Extract back to dict for LiteLLM
         openai_data = final_request.model_dump(exclude_none=True)
         is_streaming = openai_data.get("stream", False)
-        provider_creds = resolve_provider_credentials(request, "anthropic", auth)
-        openai_data["api_key"] = provider_creds.api_key
-        if provider_creds.organization:
-            openai_data["organization"] = provider_creds.organization
-        logger.info(
-            "[%s] Forwarding to Anthropic using %s credentials (hash=%s)",
-            call_id,
-            provider_creds.source,
-            hash_api_key(provider_creds.api_key),
-        )
 
         # Identify any model-specific parameters to forward
         known_params = {"verbosity"}  # Add more as needed
@@ -664,11 +511,8 @@ async def anthropic_messages(
 
 __all__ = [
     "router",
-    "GatewayAuth",
-    "ProviderCredentials",
     "hash_api_key",
     "verify_token",
-    "resolve_provider_credentials",
     "stream_llm_chunks",
     "stream_with_policy_control",
     "process_request_with_policy",

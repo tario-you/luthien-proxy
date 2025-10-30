@@ -3,13 +3,6 @@
 # This file specifies the active policy for the V2 integrated architecture.
 # Set the V2_POLICY_CONFIG environment variable to point to this file.
 
-gateway:
-  allow_client_provider_keys: true
-
-providers:
-  openai:
-    enabled: true
-
 
 # Default Noop Policy
 policy:

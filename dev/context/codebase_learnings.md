@@ -62,11 +62,4 @@ def v2_gateway():
 
 ---
 
-## Provider Credential Flow (2025-10-29)
-
-- `config/v2_config.yaml` drives gateway behavior beyond policies: `gateway.allow_client_provider_keys` toggles pass-through mode.
-- `RuntimeConfig` (loaded during app init) hydrates runtime state; providers default to env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) unless YAML overrides `api_key` / `org`.
-- Gateway auth supports three sources for upstream credentials (precedence): client-supplied header, config-provided key, environment fallback.
-- New helper `resolve_provider_credentials` injects `api_key`/`organization` into LiteLLM requests without persisting secrets in stored request payloads.
-
 (Add learnings as discovered during development with timestamps: YYYY-MM-DD)

@@ -3,7 +3,6 @@
 
 """Tests for V2 gateway routes."""
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -17,41 +16,16 @@ from tests.unit_tests.v2.gateway_test_fixtures import (
     mock_control_plane,  # noqa: F401 - pytest fixture
 )
 
-from luthien_proxy.v2.config import ProviderSettings, RuntimeConfig
 from luthien_proxy.v2.gateway_routes import (
-    GatewayAuth,
     add_model_specific_params,
     hash_api_key,
     process_non_streaming_response,
     publish_request_received_event,
     publish_request_sent_event,
-    resolve_provider_credentials,
     stream_llm_chunks,
     stream_with_policy_control,
     verify_token,
 )
-
-
-def build_request(
-    *,
-    headers: dict[str, str] | None = None,
-    path: str = "/v1/chat/completions",
-    api_key: str = "valid-key-123",
-    runtime_config: RuntimeConfig | None = None,
-) -> SimpleNamespace:
-    """Construct a minimal request-like object for auth tests."""
-    runtime_config = runtime_config or RuntimeConfig()
-    state = SimpleNamespace(
-        api_key=api_key,
-        runtime_config=runtime_config,
-        gateway_settings=runtime_config.gateway,
-        provider_settings=runtime_config.providers,
-    )
-    return SimpleNamespace(
-        app=SimpleNamespace(state=state),
-        headers=headers or {},
-        url=SimpleNamespace(path=path),
-    )
 
 
 class TestAuthentication:
@@ -72,14 +46,12 @@ class TestAuthentication:
 
     def test_verify_token_with_valid_bearer(self):
         """Test token verification succeeds with valid Bearer credentials."""
-        runtime_config = RuntimeConfig()
-        request = build_request(runtime_config=runtime_config)
+        mock_request = Mock()
+        mock_request.app.state.api_key = "valid-key-123"
+        mock_request.headers.get.return_value = None  # No x-api-key header
         credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="valid-key-123")
 
-        auth = verify_token(request, credentials)
-        assert isinstance(auth, GatewayAuth)
-        assert auth.auth_type == "proxy"
-        assert auth.presented_key == "valid-key-123"
+        assert verify_token(mock_request, credentials) == "valid-key-123"
 
     @pytest.mark.parametrize(
         "credentials",
@@ -90,18 +62,24 @@ class TestAuthentication:
     )
     def test_verify_token_with_invalid_bearer(self, credentials):
         """Test token verification fails with invalid or missing Bearer credentials."""
-        request = build_request()
+        mock_request = Mock()
+        mock_request.app.state.api_key = "valid-key-123"
+        mock_request.headers.get.return_value = None  # No x-api-key header
 
         with pytest.raises(HTTPException) as exc_info:
-            verify_token(request, credentials)
+            verify_token(mock_request, credentials)
         assert exc_info.value.status_code == 401
 
     def test_verify_token_with_valid_x_api_key(self):
         """Test token verification succeeds with valid x-api-key header (Anthropic-style)."""
-        request = build_request(headers={"x-api-key": "valid-key-123"})
-        auth = verify_token(request, None)
-        assert auth.auth_type == "proxy"
-        assert auth.presented_key == "valid-key-123"
+        mock_request = Mock()
+        mock_request.app.state.api_key = "valid-key-123"
+        mock_request.headers.get.return_value = "valid-key-123"
+
+        # No Bearer credentials
+        credentials = None
+
+        assert verify_token(mock_request, credentials) == "valid-key-123"
 
     @pytest.mark.parametrize(
         "x_api_key",
@@ -112,49 +90,16 @@ class TestAuthentication:
     )
     def test_verify_token_with_invalid_x_api_key(self, x_api_key):
         """Test token verification fails with invalid or missing x-api-key header."""
-        request = build_request(headers={"x-api-key": x_api_key} if x_api_key else {})
+        mock_request = Mock()
+        mock_request.app.state.api_key = "valid-key-123"
+        mock_request.headers.get.return_value = x_api_key
+
+        # No Bearer credentials
+        credentials = None
+
         with pytest.raises(HTTPException) as exc_info:
-            verify_token(request, None)
+            verify_token(mock_request, credentials)
         assert exc_info.value.status_code == 401
-
-    def test_verify_token_accepts_client_provider_key_when_enabled(self):
-        """Provider API keys may authenticate when gateway allows client keys."""
-        runtime_config = RuntimeConfig()
-        runtime_config.gateway.allow_client_provider_keys = True
-        request = build_request(runtime_config=runtime_config)
-        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="sk-provider-test")
-
-        auth = verify_token(request, credentials)
-        assert auth.auth_type == "client_provider"
-        assert auth.provider_name == "openai"
-        assert auth.provider_api_key == "sk-provider-test"
-
-    def test_verify_token_rejects_client_key_when_provider_disabled(self):
-        """Client-provided keys are rejected if provider disabled in config."""
-        runtime_config = RuntimeConfig()
-        runtime_config.gateway.allow_client_provider_keys = True
-        runtime_config.providers["openai"] = ProviderSettings(name="openai", enabled=False)
-        request = build_request(runtime_config=runtime_config)
-        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="sk-provider-test")
-
-        with pytest.raises(HTTPException) as exc_info:
-            verify_token(request, credentials)
-        assert exc_info.value.status_code == 403
-
-    def test_verify_token_uses_anthropic_header_for_client_key(self):
-        """Anthropic x-api-key may be used as provider key in pass-through mode."""
-        runtime_config = RuntimeConfig()
-        runtime_config.gateway.allow_client_provider_keys = True
-        request = build_request(
-            runtime_config=runtime_config,
-            path="/v1/messages",
-            headers={"x-api-key": "anthropic-provider-key"},
-        )
-
-        auth = verify_token(request, None)
-        assert auth.auth_type == "client_provider"
-        assert auth.provider_name == "anthropic"
-        assert auth.provider_api_key == "anthropic-provider-key"
 
 
 class TestHelperFunctions:
@@ -215,66 +160,6 @@ class TestHelperFunctions:
         assert call_args[1]["event_type"] == event_type
         for key, value in params.items():
             assert call_args[1]["data"][key] == value
-
-
-class TestResolveProviderCredentials:
-    """Tests for resolve_provider_credentials helper."""
-
-    def test_prefers_client_credentials(self):
-        runtime_config = RuntimeConfig()
-        request = build_request(runtime_config=runtime_config)
-        auth = GatewayAuth(
-            auth_type="client_provider",
-            presented_key="sk-client",
-            provider_name="openai",
-            provider_api_key="sk-client",
-            provider_org="org-client",
-        )
-
-        creds = resolve_provider_credentials(request, "openai", auth)
-        assert creds.source == "client"
-        assert creds.api_key == "sk-client"
-        assert creds.organization == "org-client"
-
-    def test_uses_configured_credentials(self):
-        runtime_config = RuntimeConfig()
-        runtime_config.providers["openai"] = ProviderSettings(
-            name="openai",
-            enabled=True,
-            api_key="sk-config",
-            org="org-config",
-        )
-        request = build_request(runtime_config=runtime_config)
-        auth = GatewayAuth(auth_type="proxy", presented_key="valid-key-123")
-
-        creds = resolve_provider_credentials(request, "openai", auth)
-        assert creds.source == "config"
-        assert creds.api_key == "sk-config"
-        assert creds.organization == "org-config"
-
-    def test_falls_back_to_env_credentials(self, monkeypatch):
-        runtime_config = RuntimeConfig()
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-        monkeypatch.setenv("OPENAI_ORGANIZATION", "org-env")
-        request = build_request(runtime_config=runtime_config)
-        auth = GatewayAuth(auth_type="proxy", presented_key="valid-key-123")
-
-        creds = resolve_provider_credentials(request, "openai", auth)
-        assert creds.source == "env"
-        assert creds.api_key == "sk-env"
-        assert creds.organization == "org-env"
-
-    def test_raises_when_no_credentials_available(self, monkeypatch):
-        runtime_config = RuntimeConfig()
-        # Ensure env vars not set
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_ORGANIZATION", raising=False)
-        request = build_request(runtime_config=runtime_config)
-        auth = GatewayAuth(auth_type="proxy", presented_key="valid-key-123")
-
-        with pytest.raises(HTTPException) as exc_info:
-            resolve_provider_credentials(request, "openai", auth)
-        assert exc_info.value.status_code == 401
 
 
 class TestStreamingHelpers:
