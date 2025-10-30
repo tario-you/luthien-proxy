@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from luthien_proxy.v2.config import load_policy_from_yaml
+from luthien_proxy.v2.config import (
+    GatewaySettings,
+    ProviderSettings,
+    RuntimeConfig,
+    load_policy_from_yaml,
+    load_runtime_config,
+)
 from luthien_proxy.v2.policies.noop import NoOpPolicy
 
 
@@ -151,3 +157,57 @@ policy:
         policy = load_policy_from_yaml()
 
         assert isinstance(policy, NoOpPolicy)
+
+
+class TestLoadRuntimeConfig:
+    """Tests for load_runtime_config helper."""
+
+    def test_missing_config_returns_defaults(self, tmp_path: Path):
+        """Missing config file should return default runtime settings."""
+        path = tmp_path / "missing.yaml"
+        runtime = load_runtime_config(str(path))
+
+        assert isinstance(runtime, RuntimeConfig)
+        assert isinstance(runtime.gateway, GatewaySettings)
+        assert runtime.gateway.allow_client_provider_keys is False
+        assert runtime.providers == {}
+
+    def test_loads_gateway_and_provider_sections(self, tmp_path: Path):
+        """Gateway and provider sections should be parsed into dataclasses."""
+        config_path = tmp_path / "runtime.yaml"
+        config_path.write_text(
+            """
+gateway:
+  allow_client_provider_keys: true
+
+providers:
+  openai:
+    enabled: true
+    api_key: "sk-test"
+    org: "org_123"
+"""
+        )
+
+        runtime = load_runtime_config(str(config_path))
+
+        assert runtime.gateway.allow_client_provider_keys is True
+        assert "openai" in runtime.providers
+        openai_settings = runtime.providers["openai"]
+        assert isinstance(openai_settings, ProviderSettings)
+        assert openai_settings.enabled is True
+        assert openai_settings.api_key == "sk-test"
+        assert openai_settings.org == "org_123"
+
+    def test_boolean_provider_shortcut(self, tmp_path: Path):
+        """Boolean provider entries should toggle enablement."""
+        config_path = tmp_path / "runtime_bool.yaml"
+        config_path.write_text(
+            """
+providers:
+  anthropic: false
+"""
+        )
+
+        runtime = load_runtime_config(str(config_path))
+        assert "anthropic" in runtime.providers
+        assert runtime.providers["anthropic"].enabled is False

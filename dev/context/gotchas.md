@@ -51,3 +51,8 @@ If updating existing content significantly, note it: `## Topic (2025-10-08, upda
 ---
 
 (Add gotchas as discovered with timestamps: YYYY-MM-DD)
+## Model Support Mismatch (2025-10-29)
+
+- `gpt-5` currently fails fast when requested with `stream=true`; LiteLLM raises `StreamingError` before sending chunks.
+- Default Codex launcher now pins to `gpt-4`, but override via `CODEX_MODEL` only for models verified to stream.
+- If pass-through clients insist on `gpt-5`, disable streaming or expect immediate SSE error payloads.

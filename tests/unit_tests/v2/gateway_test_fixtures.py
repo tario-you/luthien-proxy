@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from luthien_proxy.v2.config import RuntimeConfig
 from luthien_proxy.v2.gateway_routes import router
 
 
@@ -51,6 +52,9 @@ def app(mock_control_plane):
     app.state.db_pool = None
     app.state.event_publisher = None
     app.state.redis_client = None
+    app.state.runtime_config = RuntimeConfig()
+    app.state.gateway_settings = app.state.runtime_config.gateway
+    app.state.provider_settings = app.state.runtime_config.providers
 
     return app
 

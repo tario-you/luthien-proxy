@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from redis.asyncio import Redis
 
 from luthien_proxy.utils import db
-from luthien_proxy.v2.config import load_policy_from_yaml
+from luthien_proxy.v2.config import RuntimeConfig, load_policy_from_yaml, load_runtime_config
 from luthien_proxy.v2.control.synchronous_control_plane import SynchronousControlPlane
 from luthien_proxy.v2.debug import router as debug_router
 from luthien_proxy.v2.gateway_routes import router as gateway_router
@@ -32,6 +32,7 @@ def create_app(
     database_url: str,
     redis_url: str,
     policy: LuthienPolicy,
+    runtime_config: RuntimeConfig | None = None,
 ) -> FastAPI:
     """Create V2 FastAPI application with dependency injection.
 
@@ -40,10 +41,12 @@ def create_app(
         database_url: PostgreSQL database URL
         redis_url: Redis URL for event publishing
         policy: Policy handler instance
+        runtime_config: Gateway runtime configuration (providers, gateway settings)
 
     Returns:
         Configured FastAPI application with all routes and middleware
     """
+    runtime_config = runtime_config or RuntimeConfig()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -96,6 +99,9 @@ def create_app(
         app.state.event_publisher = _event_publisher
         app.state.control_plane = _control_plane
         app.state.api_key = api_key
+        app.state.runtime_config = runtime_config
+        app.state.gateway_settings = runtime_config.gateway
+        app.state.provider_settings = runtime_config.providers
         logger.info("App state initialized")
 
         yield
@@ -115,6 +121,9 @@ def create_app(
         version="2.0.0",
         lifespan=lifespan,
     )
+    app.state.runtime_config = runtime_config
+    app.state.gateway_settings = runtime_config.gateway
+    app.state.provider_settings = runtime_config.providers
 
     # Mount static files for activity monitor UI
     static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -165,6 +174,7 @@ if __name__ == "__main__":
     # Load policy from YAML configuration
     # Set V2_POLICY_CONFIG env var to override default (config/v2_config.yaml)
     policy_handler: LuthienPolicy = load_policy_from_yaml()
+    runtime_config = load_runtime_config()
 
     # Create app with factory function
     app = create_app(
@@ -172,6 +182,7 @@ if __name__ == "__main__":
         database_url=database_url,
         redis_url=redis_url,
         policy=policy_handler,
+        runtime_config=runtime_config,
     )
 
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

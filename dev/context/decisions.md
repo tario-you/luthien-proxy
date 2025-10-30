@@ -92,6 +92,20 @@ The V2 architecture supports this range:
 
 This is infrastructure-first: AI Control is an important use case, not the defining architecture.
 
+## Gateway Credential Modes (2025-10-29)
+
+**Decision**: Add runtime configuration for provider credentials, allowing either proxy-managed secrets or client pass-through keys.
+
+**Rationale**:
+- YAML-based `gateway.allow_client_provider_keys` toggle lets operators switch auth models without code changes.
+- `providers.<name>` blocks enable explicit enable/disable plus static `api_key`/`org` values.
+- Environment variables remain the fallback, preserving existing dev setups.
+
+**Implications**:
+- Gateway auth now returns a `GatewayAuth` object with provider context for downstream routing.
+- Missing or disabled providers produce 401/403 responses before reaching LiteLLM, making failures clearer.
+- Secrets are injected into outbound LiteLLM calls only, avoiding persistence in stored request payloads.
+
 ---
 
 (Add new decisions as they're made with timestamps: YYYY-MM-DD)
