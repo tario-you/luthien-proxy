@@ -47,10 +47,14 @@ echo "📊 Monitor at: http://localhost:${V2_PORT}/v2/activity/monitor"
 # Use PROXY_API_KEY for V2 gateway authentication
 export LITELLM_MASTER_KEY="${PROXY_API_KEY:-sk-luthien-dev-key}"
 
+# Default to an OpenAI chat model that supports streaming reliably
+DEFAULT_CODEX_MODEL="gpt-4"
+MODEL="${CODEX_MODEL:-$DEFAULT_CODEX_MODEL}"
+
 codex \
   -c model_providers.litellm.name=v2-gateway \
   -c model_providers.litellm.base_url=http://localhost:${V2_PORT}/v1 \
   -c model_providers.litellm.env_key=LITELLM_MASTER_KEY \
   -c model_providers.litellm.wire_api=chat \
   -c model_provider=litellm \
-  -c model="gpt-5"
+  -c model="${MODEL}"
